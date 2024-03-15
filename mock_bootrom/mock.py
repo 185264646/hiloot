@@ -4,6 +4,7 @@
 # Copyright 2024 (c) Yang Xiwen
 
 from enum import Enum, auto
+import logging
 from threading import Timer
 from typing import Set
 
@@ -80,39 +81,27 @@ Reg Name:     hi3798cv2dmb_hi3798cv200_ddr3_2gbyte_8bitx4_4layers.reg
 
         return bytes(res)
 
-    def _read_packet(self, start_bytes: Set[bytes], length: int, retry_on_crc_mismatch = True) -> Frame:
+    def _read_packet(self, start_bytes: Set[bytes], length: int) -> Frame:
         """
         Read a packet from host and echo checksum status
 
         :param start_bytes: expected start byte of the packet
         :param length: packet length
-        :param retry_on_crc_mismatch: retry if crc mismatch
-        :raises RuntimeError: checksum error
         :raises TimeoutError: timeout
+        :raises ValueError: checksum error
         :returns: retrived frame
         """
-        msg = self.dev._read_until(start_bytes)
+        msg = self._read_until(start_bytes)
         if not any(map(msg.endswith, start_bytes)):
             logging.error("start_byte not found till timeout")
             raise TimeoutError
-        elif len(hdr) > 1:
+        elif len(msg) > 1:
             logging.warning("Garbage found, this might lead to some problems for real hardware")
-            logging.info("garbage hex: %s", hdr[:-1].hex())
-        pkt = hdr[-1:] + self.dev.read(length - 1)
+            logging.info("garbage hex: %s", msg[:-1].hex())
+        pkt = msg[-1:] + self.dev.read(length - 1)
         if len(pkt) != length:
             raise TimeoutError
-        try:
-            frame = Frame.from_bytes(pkt)
-        except ValueError:
-            # Checksum mismatch
-            self.dev.write(b'\x55')
-            if retry_on_error:
-                return self._read_packet(start_bytes, length, retry_on_error)
-            raise RuntimeError("CRC mismatch")
-        else:
-            self.dev.write(b'\xAA')
-
-        return frame
+        return Frame.from_bytes(pkt, True)
 
     def serve_once(self):
         if self.state == HiSTBBootROMState.POWER_DOWN:
@@ -120,11 +109,7 @@ Reg Name:     hi3798cv2dmb_hi3798cv200_ddr3_2gbyte_8bitx4_4layers.reg
         elif self.state == HiSTBBootROMState.BOOTROM_START:
             time.sleep(.5)
             self.dev.write(b"BootROM Start\r\nBootMedia: eMMC\r\n")
-            # start a timer for 0.5 seconds
-            def f(self):
-                self.timeout = True
-            self._timer = threading.Timer(.5, f, (self, ))
-            self._timer.run()
+            self._timer
             self.state += 1
         elif self.state == HiSTBBootROMState.WAIT_TYPE_FRAME:
             if self.timeout:

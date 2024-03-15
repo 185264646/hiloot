@@ -2,6 +2,7 @@ import unittest
 
 import serial
 
+from hiloot import Frame, FrameType
 from ..mock import *
 
 class TestHiSTBBootROM(unittest.TestCase):
@@ -19,3 +20,16 @@ class TestHiSTBBootROM(unittest.TestCase):
         # non-existant
         pkt = self.obj._read_until((b'#',))
         self.assertEqual(pkt, b'string')
+
+    def test_read_packet(self):
+        test_frame_okay = Frame(FrameType.TYPE, 0x78, b'test')
+        self.obj.dev.write(test_frame_okay.to_bytes(True))
+        recv_pkt = self.obj._read_packet((b'\xbd',), 9)
+        self.assertEqual(recv_pkt, test_frame_okay)
+
+        # prepend some garbage
+        self.obj.dev.write(b'garbage')
+        self.obj.dev.write(test_frame_okay.to_bytes(True))
+        recv_pkt = self.obj._read_packet((b'\xbd',), 9)
+        self.assertEqual(recv_pkt, test_frame_okay)
+
