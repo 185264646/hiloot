@@ -5,7 +5,6 @@
 
 from enum import Enum, auto
 import logging
-from threading import Timer
 from typing import Set
 
 from binascii import crc_hqx
@@ -40,6 +39,26 @@ class HiSTBBootROMState(Enum):
 PredefinedChipID = {
         'MV200': ChipID(0x37986200, 0x3, False, False, False),
         }
+
+class FrameInfo(NamedTuple):
+    start_byte: bytes
+    length: int
+
+class FrameInfoEnums(Enum):
+    # start_byte, length
+    TYPE = FrameInfo(b'\xbd', 13)
+    HEAD = FrameInfo(b'\xfe', 13)
+    DATA = FrameInfo(b'\xda', 1029)
+    TAIL = FrameInfo(b'\xed', 13)
+    BOARD = FrameInfo(b'\xce', 13)
+
+    @classmethod
+    def get_from_byte(cls, b: bytes):
+        for i in cls:
+            if i.start_byte == b:
+                return i
+        raise ValueError("f{b} not found")
+
 
 class HiSTBBootROM:
     BOOTROM_START_MSG = "\r\nBootrom start\r\nBoot Media: eMMC\r\n"
@@ -76,14 +95,14 @@ Reg Name:     hi3798cv2dmb_hi3798cv200_ddr3_2gbyte_8bitx4_4layers.reg
             ch = self.dev.read(1)
             if ch:
                 res.append(ch[0])
-            if not ch or ch in start_bytes:
+            else:
                 break
 
         return bytes(res)
 
-    def _read_packet(self, start_bytes: Set[bytes], length: int) -> Frame:
+    def _read_packet(self, allowed_frames: Set[FrameInfo]) -> Frame:
         """
-        Read a packet from host and echo checksum status
+        Read a packet from host
 
         :param start_bytes: expected start byte of the packet
         :param length: packet length
@@ -91,17 +110,33 @@ Reg Name:     hi3798cv2dmb_hi3798cv200_ddr3_2gbyte_8bitx4_4layers.reg
         :raises ValueError: checksum error
         :returns: retrived frame
         """
+        start_bytes = map(lambda frame: frame.start_byte, allowed_frames)
         msg = self._read_until(start_bytes)
         if not any(map(msg.endswith, start_bytes)):
             logging.error("start_byte not found till timeout")
             raise TimeoutError
         elif len(msg) > 1:
-            logging.warning("Garbage found, this might lead to some problems for real hardware")
+            logging.warning("Garbage found. This might lead to some problems for real hardware")
             logging.info("garbage hex: %s", msg[:-1].hex())
+        length = FrameInfoEnums.get_from_byte(msg[-1:])
         pkt = msg[-1:] + self.dev.read(length - 1)
         if len(pkt) != length:
             raise TimeoutError
         return Frame.from_bytes(pkt, True)
+
+    def communicate(self, start_bytes: Set[bytes], length: int) -> Frame:
+        """
+        Read a packet from host, echo checksum status, auto restart till timeout
+        """
+        try:
+            pkt = self._read_packet(start_bytes, length)
+        except ValueError:
+            # Retry if the frame is broken
+            self.dev.write(b'\x55')
+            pkt = self._read_packet_retry(start_bytes, length)
+
+        self.dev.write(b'\xAA')
+        return pkt
 
     def serve_once(self):
         if self.state == HiSTBBootROMState.POWER_DOWN:
@@ -109,23 +144,16 @@ Reg Name:     hi3798cv2dmb_hi3798cv200_ddr3_2gbyte_8bitx4_4layers.reg
         elif self.state == HiSTBBootROMState.BOOTROM_START:
             time.sleep(.5)
             self.dev.write(b"BootROM Start\r\nBootMedia: eMMC\r\n")
-            self._timer
+            self._timer = Timeout(.5)
             self.state += 1
         elif self.state == HiSTBBootROMState.WAIT_TYPE_FRAME:
-            if self.timeout:
+            if self._timer.expired():
                 # No type frame is found before timeout
                 self.state = HiSTBBootROMState.ERROR
             else:
-                try:
-                    self._read_packet(b'\xFF', 13, False)
-                except TimeoutError:
-                    pass
-                except RuntimeError:
-                    pass
-                else:
-                    # Return the type frame
-                    self.dev.write(bytes(self.chipid))
-                    self.state += 1
+                self.communicate((b'\xbd', b'\xfe'), 
+
+
         elif self.state == HiSTBBootROMState.WAIT_HEAD_AREA:
             ...
 

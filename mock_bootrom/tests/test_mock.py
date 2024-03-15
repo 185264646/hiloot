@@ -33,3 +33,13 @@ class TestHiSTBBootROM(unittest.TestCase):
         recv_pkt = self.obj._read_packet((b'\xbd',), 9)
         self.assertEqual(recv_pkt, test_frame_okay)
 
+        # insufficient frame
+        self.obj.dev.write(test_frame_okay.to_bytes(True))
+        with self.assertRaises(TimeoutError):
+            self.obj._read_packet((b'\xbd',), 10)
+
+        # checksum mismatch
+        self.obj.dev.write(test_frame_okay.to_bytes(True))
+        with self.assertRaises(ValueError):
+            self.obj._read_packet((b'\xbd',), 8)
+
