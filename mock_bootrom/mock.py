@@ -5,7 +5,7 @@
 
 from enum import Enum, auto
 import logging
-from typing import Set
+from typing import Dict, Set
 
 from binascii import crc_hqx
 
@@ -40,25 +40,19 @@ PredefinedChipID = {
         'MV200': ChipID(0x37986200, 0x3, False, False, False),
         }
 
-class FrameInfo(NamedTuple):
-    start_byte: bytes
-    length: int
-
-class FrameInfoEnums(Enum):
+class FrameInfoEnums(bytes, Enum):
     # start_byte, length
-    TYPE = FrameInfo(b'\xbd', 13)
-    HEAD = FrameInfo(b'\xfe', 13)
-    DATA = FrameInfo(b'\xda', 1029)
-    TAIL = FrameInfo(b'\xed', 13)
-    BOARD = FrameInfo(b'\xce', 13)
+    TYPE = (b'\xbd', 13)
+    HEAD = (b'\xfe', 13)
+    DATA = (b'\xda', 1029)
+    TAIL = (b'\xed', 13)
+    BOARD = (b'\xce', 13)
 
-    @classmethod
-    def get_from_byte(cls, b: bytes):
-        for i in cls:
-            if i.start_byte == b:
-                return i
-        raise ValueError("f{b} not found")
-
+    def __new__(cls, start_byte: bytes, length: int):
+        obj = bytes.__new__(cls, start_byte)
+        obj._value_ = start_byte
+        obj.length = length
+        return obj
 
 class HiSTBBootROM:
     BOOTROM_START_MSG = "\r\nBootrom start\r\nBoot Media: eMMC\r\n"
@@ -95,22 +89,23 @@ Reg Name:     hi3798cv2dmb_hi3798cv200_ddr3_2gbyte_8bitx4_4layers.reg
             ch = self.dev.read(1)
             if ch:
                 res.append(ch[0])
+                if ch in start_bytes:
+                    break
             else:
                 break
 
         return bytes(res)
 
-    def _read_packet(self, allowed_frames: Set[FrameInfo]) -> Frame:
+    def _read_packet(self, allowed_frames: Dict[bytes, int]) -> Frame:
         """
         Read a packet from host
 
-        :param start_bytes: expected start byte of the packet
-        :param length: packet length
+        :param allowed_frames: expected start byte and packet length
         :raises TimeoutError: timeout
         :raises ValueError: checksum error
         :returns: retrived frame
         """
-        start_bytes = map(lambda frame: frame.start_byte, allowed_frames)
+        start_bytes = allowed_frames.keys()
         msg = self._read_until(start_bytes)
         if not any(map(msg.endswith, start_bytes)):
             logging.error("start_byte not found till timeout")
@@ -118,22 +113,21 @@ Reg Name:     hi3798cv2dmb_hi3798cv200_ddr3_2gbyte_8bitx4_4layers.reg
         elif len(msg) > 1:
             logging.warning("Garbage found. This might lead to some problems for real hardware")
             logging.info("garbage hex: %s", msg[:-1].hex())
-        length = FrameInfoEnums.get_from_byte(msg[-1:])
+        length = allowed_frames[msg[-1:]]
         pkt = msg[-1:] + self.dev.read(length - 1)
         if len(pkt) != length:
             raise TimeoutError
         return Frame.from_bytes(pkt, True)
 
-    def communicate(self, start_bytes: Set[bytes], length: int) -> Frame:
+    def communicate(self, allowed_frames: Dict[bytes, int]) -> Frame:
         """
         Read a packet from host, echo checksum status, auto restart till timeout
         """
-        try:
-            pkt = self._read_packet(start_bytes, length)
-        except ValueError:
-            # Retry if the frame is broken
-            self.dev.write(b'\x55')
-            pkt = self._read_packet_retry(start_bytes, length)
+        while True:
+            try:
+                pkt = self._read_packet(allowed_frames)
+            except ValueError:
+                self.dev.write(b'\x55')
 
         self.dev.write(b'\xAA')
         return pkt
@@ -151,7 +145,7 @@ Reg Name:     hi3798cv2dmb_hi3798cv200_ddr3_2gbyte_8bitx4_4layers.reg
                 # No type frame is found before timeout
                 self.state = HiSTBBootROMState.ERROR
             else:
-                self.communicate((b'\xbd', b'\xfe'), 
+                pass
 
 
         elif self.state == HiSTBBootROMState.WAIT_HEAD_AREA:
