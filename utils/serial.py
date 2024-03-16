@@ -243,14 +243,3 @@ class SerialMux:
 
             i += 1
             _logger.warning(f'retransmitting {i}...')
-
-class SerialLoopback(SerialBase):
-    """A serial loopback implemention, entirely in software"""
-    def __init__(buf_in, buf_out):
-        ...
-
-    def open(self):
-        ...
-
-    def close(self):
-        ...

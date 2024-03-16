@@ -5,7 +5,7 @@
 
 from enum import Enum, auto
 import logging
-from typing import Dict, Set
+from typing import Callable, Dict, Optional, Set
 
 from binascii import crc_hqx
 
@@ -76,7 +76,6 @@ Reg Name:     hi3798cv2dmb_hi3798cv200_ddr3_2gbyte_8bitx4_4layers.reg
         self.state = HiSTBBootROMState.POWER_DOWN
         self.dev = dev
         self.chipid = chipid
-        self.timeout = False
 
     def _read_until(self, start_bytes: Set[bytes]) -> bytes:
         """
@@ -108,7 +107,7 @@ Reg Name:     hi3798cv2dmb_hi3798cv200_ddr3_2gbyte_8bitx4_4layers.reg
         start_bytes = allowed_frames.keys()
         msg = self._read_until(start_bytes)
         if not any(map(msg.endswith, start_bytes)):
-            logging.error("start_byte not found till timeout")
+            logging.warning("start_byte not found till timeout, received msg hex: %s", msg.hex())
             raise TimeoutError
         elif len(msg) > 1:
             logging.warning("Garbage found. This might lead to some problems for real hardware")
@@ -119,25 +118,91 @@ Reg Name:     hi3798cv2dmb_hi3798cv200_ddr3_2gbyte_8bitx4_4layers.reg
             raise TimeoutError
         return Frame.from_bytes(pkt, True)
 
-    def communicate(self, allowed_frames: Dict[bytes, int]) -> Frame:
+    def communicate(self, allowed_frames: Dict[bytes, int], get_reply: Optional[Callable[[bytes], bytes]] = None) -> Frame:
         """
-        Read a packet from host, echo checksum status, auto restart till timeout
+        Read a packet from host, auto restart if checksum mismatch
         """
         while True:
             try:
                 pkt = self._read_packet(allowed_frames)
             except ValueError:
+                logging.warning("CRC mismatch, retrying...")
                 self.dev.write(b'\x55')
+                continue
+            if get_reply:
+                reply = get_reply(pkt)
+            else:
+                reply = b'\xAA'
+            self.dev.write(reply)
+            if reply != b'\x55':
+                break
 
-        self.dev.write(b'\xAA')
         return pkt
+
+    def retrive_file(self, skip_head = False) -> None:
+        """
+        Read a file from host
+
+        :param skip_head: skip head packet (HACK)
+        """
+        current_index = 0 if skip_head else -1
+        total = 1
+
+        def validate_file_packet(frame: Frame) -> bool:
+            nonlocal current_index, total
+            if current_index == -1:
+                # HEAD frame is not received.
+                if frame.type != FrameType.HEAD:
+                    return False
+                hdr = HeadRequest.from_bytes(frame.to_bytes(False))
+                total = (hdr.size + 1023) // 1024
+                current_index += 1
+                return True
+            elif current_index == 0:
+                # HEAD received, but the host may still duplicate HEAD frame
+                if frame.type not in (FrameType.HEAD, FrameType.DATA):
+                    return False
+                elif frame.seq != 0:
+                    return False
+                current_index += 1
+                return True
+            elif 0 < current_index < total:
+                if frame.type != FrameType.DATA:
+                    return False
+                elif frame.seq not in (current_index % 256, (current_index + 1) % 256):
+                    return False
+                current_index += 1
+                return True
+            elif current_index == total:
+                if frame.type not in (FrameType.DATA, FrameType.TAIL):
+                    return False
+                elif frame.type == FrameType.TAIL:
+                    current_index += 1
+                    return True
+                elif frame.seq != current_index % 256:
+                    return False
+                return True
+            return False
+
+        while current_index <= total:
+            if current_index == -1:
+                allowed_frames = dict((FrameInfoEnums.HEAD,))
+            elif current_index == 0:
+                allowed_frames = dict((FrameInfoEnums.HEAD, FrameInfoEnums.DATA))
+            elif 0 < current_index < total:
+                allowed_frames = dict((FrameInfoEnums.DATA,))
+            else:
+                allowed_frames = dict((FrameInfoEnums.DATA, FrameInfoEnums.TAIL))
+
+            self.communicate(allowed_frames, lambda pkt: b'\xAA' if validate_file_packet(pkt) else b'\x55')
+
 
     def serve_once(self):
         if self.state == HiSTBBootROMState.POWER_DOWN:
             pass
         elif self.state == HiSTBBootROMState.BOOTROM_START:
             time.sleep(.5)
-            self.dev.write(b"BootROM Start\r\nBootMedia: eMMC\r\n")
+            self.dev.write(self.BOOTROM_START_MSG)
             self._timer = Timeout(.5)
             self.state += 1
         elif self.state == HiSTBBootROMState.WAIT_TYPE_FRAME:
@@ -145,9 +210,13 @@ Reg Name:     hi3798cv2dmb_hi3798cv200_ddr3_2gbyte_8bitx4_4layers.reg
                 # No type frame is found before timeout
                 self.state = HiSTBBootROMState.ERROR
             else:
-                pass
-
-
+                try:
+                    # FIXME: retrieve chip id from framework
+                    self.communicate(dict((FrameInfoEnums.TYPE,)), b'\xBD\x00\xFF\x08\x00\x00\x00\x37\x98\x03\x00\xAA')
+                except TimeoutError:
+                    pass
+                else:
+                    self.state += 1
         elif self.state == HiSTBBootROMState.WAIT_HEAD_AREA:
             ...
 
