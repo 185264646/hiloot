@@ -1,3 +1,4 @@
+import logging
 import os
 import pty
 import unittest
@@ -5,7 +6,7 @@ import time
 
 import serial
 
-from hiloot import Frame, FrameType
+from hiloot import Frame, FrameType, HeadRequest
 from ..mock import *
 
 class TestHiSTBBootROM(unittest.TestCase):
@@ -17,6 +18,7 @@ class TestHiSTBBootROM(unittest.TestCase):
         # use pty instead, it's bidirectional
         self.master, slave = pty.openpty()
         self.obj2 = HiSTBBootROM(serial.Serial(os.ttyname(slave), timeout = .2), PredefinedChipID['MV200'])
+        logging.basicConfig(level = logging.ERROR)
 
     def tearDown(self):
         pass
@@ -76,4 +78,36 @@ class TestHiSTBBootROM(unittest.TestCase):
         self.assertEqual(out, b'\x55\xAA')
 
     def test_retrive_file(self):
-        ...
+        file_size = 0x1000
+        data_pkt_cnt = file_size // 0x400
+        head_frame = Frame(FrameType.HEAD, 0, bytes(HeadRequest(file_size, 0x0)))
+        data_frames = [Frame(FrameType.DATA, i, bytes(1024)) for i in range(1, data_pkt_cnt + 1)]
+        tail_frame = Frame(FrameType.TAIL, data_pkt_cnt + 1, b'')
+
+        os.write(self.master, head_frame.to_bytes(True))
+        for frame in data_frames:
+            os.write(self.master, frame.to_bytes(True))
+        os.write(self.master, tail_frame.to_bytes(True))
+
+        self.obj2.retrive_file()
+        # FIXME: read in a loop, this is really unreliable
+        # Wait for OS pty data sync
+        time.sleep(.01)
+        out = os.read(self.master, data_pkt_cnt + 2)
+        self.assertEqual(out, b'\xAA' * (data_pkt_cnt + 2))
+
+        os.write(self.master, head_frame.to_bytes(True))
+        for frame in data_frames:
+            # Mangle pkt 4
+            os.write(self.master, frame.to_bytes(True if frame.seq != 4 else False))
+            if frame.seq == 4:
+                os.write(self.master, b'\x12\x34')
+                os.write(self.master, frame.to_bytes(True))
+        os.write(self.master, tail_frame.to_bytes(True))
+
+        self.obj2.retrive_file()
+        # FIXME: read in a loop, this is really unreliable
+        time.sleep(.01)
+        out=os.read(self.master, data_pkt_cnt + 3)
+        self.assertEqual(out, b'\xAA' * data_pkt_cnt + b'\x55' + b'\xAA' * 2)
+

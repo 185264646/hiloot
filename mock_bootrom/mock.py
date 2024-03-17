@@ -13,7 +13,7 @@ import serial
 
 from serial.serialutil import Timeout
 
-from hiloot import ChipID, Frame
+from hiloot import ChipID, HeadRequest, Frame, FrameType
 
 # TODO: Find all possible cmds for each stage
 class HiSTBBootROMState(Enum):
@@ -42,17 +42,21 @@ PredefinedChipID = {
 
 class FrameInfoEnums(bytes, Enum):
     # start_byte, length
-    TYPE = (b'\xbd', 13)
-    HEAD = (b'\xfe', 13)
+    TYPE = (b'\xbd', 14)
+    HEAD = (b'\xfe', 14)
     DATA = (b'\xda', 1029)
-    TAIL = (b'\xed', 13)
-    BOARD = (b'\xce', 13)
+    TAIL = (b'\xed', 5)
+    BOARD = (b'\xce', 14)
 
     def __new__(cls, start_byte: bytes, length: int):
         obj = bytes.__new__(cls, start_byte)
         obj._value_ = start_byte
         obj.length = length
         return obj
+
+    @property
+    def as_tuple(self):
+        return (self._value_, self.length)
 
 class HiSTBBootROM:
     BOOTROM_START_MSG = "\r\nBootrom start\r\nBoot Media: eMMC\r\n"
@@ -139,37 +143,43 @@ Reg Name:     hi3798cv2dmb_hi3798cv200_ddr3_2gbyte_8bitx4_4layers.reg
 
         return pkt
 
-    def retrive_file(self, skip_head = False) -> None:
+    def answer_type_frame(self, timeout: False) -> None:
+        """
+        read and answer type frame from host
+        """
+        ...
+
+    def retrive_file(self, skip_head = False, total = 2) -> None:
         """
         Read a file from host
 
         :param skip_head: skip head packet (HACK)
+        :param total: if head packet is skipped, specify total data packets
         """
-        current_index = 0 if skip_head else -1
-        total = 1
+        current_index = 1 if skip_head else 0
 
         def validate_file_packet(frame: Frame) -> bool:
             nonlocal current_index, total
-            if current_index == -1:
+            if current_index == 0:
                 # HEAD frame is not received.
                 if frame.type != FrameType.HEAD:
                     return False
-                hdr = HeadRequest.from_bytes(frame.to_bytes(False))
-                total = (hdr.size + 1023) // 1024
+                hdr = HeadRequest.from_bytes(frame.payload)
+                total = 1 + (hdr.size + 1023) // 1024
                 current_index += 1
                 return True
-            elif current_index == 0:
+            elif current_index == 1:
                 # HEAD received, but the host may still duplicate HEAD frame
                 if frame.type not in (FrameType.HEAD, FrameType.DATA):
                     return False
-                elif frame.seq != 0:
+                elif frame.seq != 1:
                     return False
                 current_index += 1
                 return True
-            elif 0 < current_index < total:
+            elif 1 < current_index < total:
                 if frame.type != FrameType.DATA:
                     return False
-                elif frame.seq not in (current_index % 256, (current_index + 1) % 256):
+                elif frame.seq not in (current_index % 256, (current_index - 1) % 256):
                     return False
                 current_index += 1
                 return True
@@ -185,14 +195,14 @@ Reg Name:     hi3798cv2dmb_hi3798cv200_ddr3_2gbyte_8bitx4_4layers.reg
             return False
 
         while current_index <= total:
-            if current_index == -1:
-                allowed_frames = dict((FrameInfoEnums.HEAD,))
-            elif current_index == 0:
-                allowed_frames = dict((FrameInfoEnums.HEAD, FrameInfoEnums.DATA))
-            elif 0 < current_index < total:
-                allowed_frames = dict((FrameInfoEnums.DATA,))
+            if current_index == 0:
+                allowed_frames = dict((FrameInfoEnums.HEAD.as_tuple,))
+            elif current_index == 1:
+                allowed_frames = dict((FrameInfoEnums.HEAD.as_tuple, FrameInfoEnums.DATA.as_tuple))
+            elif 1 < current_index < total:
+                allowed_frames = dict((FrameInfoEnums.DATA.as_tuple,))
             else:
-                allowed_frames = dict((FrameInfoEnums.DATA, FrameInfoEnums.TAIL))
+                allowed_frames = dict((FrameInfoEnums.DATA.as_tuple, FrameInfoEnums.TAIL.as_tuple))
 
             self.communicate(allowed_frames, lambda pkt: b'\xAA' if validate_file_packet(pkt) else b'\x55')
 
